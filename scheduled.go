@@ -14,51 +14,48 @@ type scheduled struct {
 }
 
 func (s *scheduled) start() {
-	go s.poll(true)
+	go (func() {
+		for {
+			if s.closed {
+				return
+			}
+
+			s.poll()
+
+			time.Sleep(time.Duration(Config.PollInterval) * time.Millisecond)
+		}
+	})()
 }
 
 func (s *scheduled) quit() {
 	s.closed = true
 }
 
-func (s *scheduled) poll(continuing bool) {
+func (s *scheduled) poll() {
+	conn := Config.Pool.Get()
 
-	for {
-		if s.closed {
-			return
-		}
+	now := time.Now().UTC().Unix()
 
-		conn := Config.Pool.Get()
+	for _, key := range s.keys {
+		key = Config.Namespace + key
+		for {
+			messages, _ := redis.Strings(conn.Do("zrangebyscore", key, "-inf", now, "limit", 0, 1))
 
-		now := time.Now().Unix()
+			if len(messages) == 0 {
+				break
+			}
 
-		for _, key := range s.keys {
-			key = Config.Namespace + key
-			for {
-				messages, _ := redis.Strings(conn.Do("zrangebyscore", key, "-inf", now, "limit", 0, 1))
+			message, _ := NewMsg(messages[0])
 
-				if len(messages) == 0 {
-					break
-				}
-
-				message, _ := NewMsg(messages[0])
-
-				if removed, err := redis.Int(conn.Do("zrem", key, messages[0])); removed == 1 && err == nil {
-					queue, _ := message.Get("queue").String()
-					queue = strings.TrimPrefix(queue, Config.Namespace)
-					conn.Do("lpush", Config.Namespace+"queue:"+queue, message.ToJson())
-				}
+			if removed, _ := redis.Bool(conn.Do("zrem", key, messages[0])); removed {
+				queue, _ := message.Get("queue").String()
+				queue = strings.TrimPrefix(queue, Config.Namespace)
+				conn.Do("lpush", Config.Namespace+"queue:"+queue, message.ToJson())
 			}
 		}
-
-		conn.Close()
-		if continuing {
-			time.Sleep(time.Duration(Config.PollInterval) * time.Millisecond)
-			// s.poll(true)
-		}
-
 	}
 
+	conn.Close()
 }
 
 func newScheduled(keys ...string) *scheduled {
